@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: driving-english
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.1-flash-live-preview
+      - key: GEMINI_VOICE
+        value: Aoede
