@@ -8,7 +8,7 @@ import { dirname, join } from 'path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.GEMINI_API_KEY;
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash-live-001';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-live-preview';
 const VOICE = process.env.GEMINI_VOICE || 'Aoede';
 
 if (!API_KEY || API_KEY === 'ここにAPIキー') {
