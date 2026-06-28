@@ -1,0 +1,17 @@
+name: keep-warm
+
+# Render無料プランは15分無操作でスリープ→次回起動が遅い。
+# 10分ごとにアクセスして起こし続け、常に即起動の状態を保つ。
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: アプリにアクセスしてスリープを防ぐ
+        run: |
+          code=$(curl -sS -m 90 -o /dev/null -w "%{http_code}" https://driving-english.onrender.com/ || true)
+          echo "応答コード: $code"
