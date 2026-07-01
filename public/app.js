@@ -6,6 +6,14 @@ let timerId = null;
 let seconds = 0;
 let wrappedUp = false;
 
+// 運転中の安定運用まわり
+let sessionActive = false;   // 「はじめる」〜「おわる」の間 true
+let wakeLock = null;         // 画面スリープ防止
+let reconnectTimer = null;   // 再接続待ちタイマー
+let reconnectAttempts = 0;
+let heartbeatTimer = null;   // 生存確認
+let lastPong = 0;            // 最後にサーバから応答が来た時刻
+
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const orb = document.getElementById('orb');
@@ -106,85 +114,135 @@ async function start() {
   startBtn.disabled = true;
   setStatus('つないでいます…');
   seconds = 0; wrappedUp = false;
+  reconnectAttempts = 0;
   logEl.innerHTML = '';
+  sessionActive = true;
 
   outCtx = new AudioContext({ sampleRate: 24000 });
   await outCtx.resume();
   playHead = outCtx.currentTime;
 
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}`);
-  ws.onopen = onWsOpen;
-  ws.onmessage = onWsMessage;
-  ws.onclose = () => { setStatus('切断しました'); resetUI(); };
-  ws.onerror = () => setStatus('接続エラー');
-}
+  await requestWakeLock(); // 会話中は画面を消させない
 
-async function onWsOpen() {
   try {
-    // レートは端末まかせ（worklet側で16kHzに変換する）
-    inCtx = new AudioContext();
-    ws.send(JSON.stringify({ debug: { inputSampleRate: inCtx.sampleRate } }));
-    const audioConstraints = { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
-    if (micSelect.value) audioConstraints.deviceId = { exact: micSelect.value };
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-    populateMics(); // 許可後はラベル（マイク名）が取れるので一覧を更新
-    const usedLabel = micStream.getAudioTracks()[0]?.label || '不明';
-    console.log('使用マイク:', usedLabel);
-    ws.send(JSON.stringify({ debug: { usingMic: usedLabel } }));
-    await inCtx.audioWorklet.addModule('pcm-processor.js');
-    const src = inCtx.createMediaStreamSource(micStream);
-    worklet = new AudioWorkletNode(inCtx, 'pcm-processor');
-    let sentChunks = 0;
-    let levelPeak = 0;
-    let lastLevelSend = 0;
-    worklet.port.onmessage = (e) => {
-      // 音量レベルを計算（話してるのに0なら、そのマイクは声を拾えていない）
-      const i16 = new Int16Array(e.data);
-      let peak = 0;
-      for (let i = 0; i < i16.length; i++) { const a = Math.abs(i16[i]); if (a > peak) peak = a; }
-      const lvl = Math.min(100, Math.round((peak / 32768) * 100));
-      if (levelBar) levelBar.style.width = lvl + '%';
-      if (lvl > levelPeak) levelPeak = lvl;
-
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data: bufToB64(e.data) } },
-        }));
-        if (++sentChunks % 20 === 0) console.log('🎤 マイク送信中 chunks=', sentChunks);
-
-        // 1秒に1回、直近のピーク音量をサーバへ（こちらでも声が入ってるか確認できる）
-        const now = performance.now();
-        if (now - lastLevelSend > 1000) {
-          ws.send(JSON.stringify({ debug: { micPeak: levelPeak } }));
-          lastLevelSend = now;
-          levelPeak = 0;
-        }
-      }
-    };
-    src.connect(worklet);
-    // 一部ブラウザはグラフがdestinationに繋がっていないと処理を止める。
-    // 無音(gain 0)で繋いでグラフを動かし続ける（自分の声は聞こえない）。
-    const mute = inCtx.createGain();
-    mute.gain.value = 0;
-    worklet.connect(mute);
-    mute.connect(inCtx.destination);
-
-    stopBtn.disabled = false;
-    orb.classList.add('live');
-    setStatus('会話できます。話しかけてください 🗣️');
-    startTimer();
+    await setupMic();      // マイクは1回だけ用意（再接続では作り直さない）
   } catch (err) {
     setStatus('マイクが使えません: ' + err.message);
     stop();
+    return;
   }
+  connect(false);
 }
+
+// マイク準備（1セッションで1回だけ）
+async function setupMic() {
+  inCtx = new AudioContext();
+  const audioConstraints = { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  if (micSelect.value) audioConstraints.deviceId = { exact: micSelect.value };
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+  populateMics();
+  console.log('使用マイク:', micStream.getAudioTracks()[0]?.label || '不明');
+  await inCtx.audioWorklet.addModule('pcm-processor.js');
+  const src = inCtx.createMediaStreamSource(micStream);
+  worklet = new AudioWorkletNode(inCtx, 'pcm-processor');
+  let sentChunks = 0, levelPeak = 0, lastLevelSend = 0;
+  worklet.port.onmessage = (e) => {
+    const i16 = new Int16Array(e.data);
+    let peak = 0;
+    for (let i = 0; i < i16.length; i++) { const a = Math.abs(i16[i]); if (a > peak) peak = a; }
+    const lvl = Math.min(100, Math.round((peak / 32768) * 100));
+    if (levelBar) levelBar.style.width = lvl + '%';
+    if (lvl > levelPeak) levelPeak = lvl;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data: bufToB64(e.data) } } }));
+      if (++sentChunks % 20 === 0) console.log('🎤 chunks=', sentChunks);
+      const now = performance.now();
+      if (now - lastLevelSend > 1000) { ws.send(JSON.stringify({ debug: { micPeak: levelPeak } })); lastLevelSend = now; levelPeak = 0; }
+    }
+  };
+  src.connect(worklet);
+  // 一部ブラウザはグラフがdestinationに繋がっていないと処理を止める→無音で繋いで動かし続ける
+  const mute = inCtx.createGain();
+  mute.gain.value = 0;
+  worklet.connect(mute);
+  mute.connect(inCtx.destination);
+}
+
+// WebSocket接続（初回 or 再接続）
+function connect(isReconnect) {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/${isReconnect ? '?greet=0' : ''}`);
+  ws.onopen = () => {
+    reconnectAttempts = 0;
+    lastPong = Date.now();
+    ws.send(JSON.stringify({ debug: { inputSampleRate: inCtx?.sampleRate, usingMic: micStream?.getAudioTracks()[0]?.label } }));
+    stopBtn.disabled = false;
+    orb.classList.add('live');
+    setStatus(isReconnect ? '再接続しました 🗣️' : '会話できます。話しかけてください 🗣️');
+    if (!timerId) startTimer();
+    startHeartbeat();
+  };
+  ws.onmessage = onWsMessage;
+  ws.onclose = () => { stopHeartbeat(); if (sessionActive) scheduleReconnect(); else resetUI(); };
+  ws.onerror = () => { /* onclose が続けて呼ばれるのでそちらで処理 */ };
+}
+
+// 電波が切れた時：少し待って自動で繋ぎ直す（会話中のみ）
+function scheduleReconnect() {
+  if (!sessionActive || reconnectTimer) return;
+  orb.classList.remove('live');
+  setStatus('接続が切れました。再接続中… 📶');
+  const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 8000);
+  reconnectAttempts++;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; if (sessionActive) connect(true); }, delay);
+}
+
+// 生存確認：4秒ごとにpingを送り、12秒応答が無ければ「固まってる」とみなして繋ぎ直す
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ ping: Date.now() }));
+      if (Date.now() - lastPong > 12000) {
+        console.warn('応答なし→接続を張り直します');
+        try { ws.close(); } catch {}
+      }
+    }
+  }, 4000);
+}
+function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
+
+// 画面スリープ防止
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+      console.log('画面スリープ防止 ON');
+    }
+  } catch (e) { console.warn('画面スリープ防止に失敗', e); }
+}
+function releaseWakeLock() {
+  try { wakeLock?.release(); } catch {}
+  wakeLock = null;
+}
+
+// アプリに戻ってきた時：画面ロック復帰・通信復活・音声再開
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !sessionActive) return;
+  if (!wakeLock) await requestWakeLock();
+  try { await outCtx?.resume(); } catch {}
+  try { await inCtx?.resume(); } catch {}
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) scheduleReconnect();
+});
 
 // ───────── Gemini からのメッセージ ─────────
 function onWsMessage(ev) {
   let msg;
   try { msg = JSON.parse(typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)); }
   catch { return; }
+
+  if (msg.pong) { lastPong = Date.now(); return; } // 生存確認の応答
 
   if (msg.error) {
     console.error('Geminiエラー:', msg.error);
@@ -261,13 +319,17 @@ function wrapUp() {
 
 // ───────── 終了 ─────────
 function stop() {
+  sessionActive = false; // これ以降は自動再接続しない
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  stopHeartbeat();
+  releaseWakeLock();
   if (timerId) { clearInterval(timerId); timerId = null; }
   stopPlayback();
   try { worklet?.disconnect(); } catch {}
   micStream?.getTracks().forEach((t) => t.stop());
   try { inCtx?.close(); } catch {}
   try { outCtx?.close(); } catch {}
-  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  if (ws) { try { if (ws.readyState === WebSocket.OPEN) ws.close(); } catch {} ws = null; }
   resetUI();
   setStatus('終了しました。おつかれさまでした');
 }

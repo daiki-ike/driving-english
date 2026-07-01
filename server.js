@@ -51,7 +51,9 @@ app.use(express.static(join(__dirname, 'public'), {
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
-wss.on('connection', (client) => {
+wss.on('connection', (client, req) => {
+  // 再接続時は挨拶を省く（?greet=0）。初回のみAIから挨拶させる。
+  const greet = !/[?&]greet=0/.test(req.url || '');
   const gem = new WebSocket(GEMINI_WS);
   let ready = false;
   const pending = [];
@@ -84,13 +86,15 @@ wss.on('connection', (client) => {
       console.log('🟢 Geminiと接続完了。話しかけてOKです');
       pending.forEach((m) => gem.send(m));
       pending.length = 0;
-      // 起動直後にAIから挨拶させる（再生が動くか即わかる＆会話の口火を切る）
-      gem.send(JSON.stringify({
-        clientContent: {
-          turns: [{ role: 'user', parts: [{ text: "Hi, I'm ready. Let's start." }] }],
-          turnComplete: true,
-        },
-      }));
+      // 初回のみAIから挨拶させる（再接続時は省いて会話を邪魔しない）
+      if (greet) {
+        gem.send(JSON.stringify({
+          clientContent: {
+            turns: [{ role: 'user', parts: [{ text: "Hi, I'm ready. Let's start." }] }],
+            turnComplete: true,
+          },
+        }));
+      }
     }
     // デバッグ用: 音声以外の主要イベントを表示
     if (msg.error) console.log('⚠️ Geminiエラー:', JSON.stringify(msg.error));
@@ -115,6 +119,10 @@ wss.on('connection', (client) => {
     const str = data.toString();
     try {
       const m = JSON.parse(str);
+      if (m.ping) {
+        if (client.readyState === WebSocket.OPEN) client.send('{"pong":true}');
+        return; // 生存確認はGeminiに送らない
+      }
       if (m.debug) {
         if (m.debug.micPeak !== undefined) {
           const bar = '█'.repeat(Math.round(m.debug.micPeak / 5)).padEnd(20, '·');
