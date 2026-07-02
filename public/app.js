@@ -131,7 +131,24 @@ async function start() {
     stop();
     return;
   }
+
+  // サーバが寝てる場合、先にHTTPで起こしておく（WS接続より起床に向いている）
+  await prewarmServer();
   connect(false);
+}
+
+// サーバがスリープしていたら起こす。最大45秒待つが、失敗してもWS接続は試みる。
+async function prewarmServer() {
+  setStatus('サーバを起こしています…（最大1分）');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    await fetch('/', { cache: 'no-store', signal: ctrl.signal });
+  } catch (e) {
+    console.warn('起床フェッチ失敗（そのままWS接続を試みます）', e.message);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // マイク準備（1セッションで1回だけ）
@@ -168,11 +185,21 @@ async function setupMic() {
   mute.connect(inCtx.destination);
 }
 
-// WebSocket接続（初回 or 再接続）
+// WebSocket接続（初回 or 再接続）。OSのTCPタイムアウト任せにせず、自前で見切りを付ける。
 function connect(isReconnect) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/${isReconnect ? '?greet=0' : ''}`);
+  let settled = false;
+  const connectTimeoutMs = isReconnect ? 10000 : 15000; // prewarm済みなので初回もそう長くは待たない
+  const giveUpTimer = setTimeout(() => {
+    if (settled) return;
+    console.warn('接続がタイムアウトしたので見切りをつけます');
+    try { ws.close(); } catch {}
+  }, connectTimeoutMs);
+
   ws.onopen = () => {
+    settled = true;
+    clearTimeout(giveUpTimer);
     reconnectAttempts = 0;
     lastPong = Date.now();
     ws.send(JSON.stringify({ debug: { inputSampleRate: inCtx?.sampleRate, usingMic: micStream?.getAudioTracks()[0]?.label } }));
@@ -183,16 +210,16 @@ function connect(isReconnect) {
     startHeartbeat();
   };
   ws.onmessage = onWsMessage;
-  ws.onclose = () => { stopHeartbeat(); if (sessionActive) scheduleReconnect(); else resetUI(); };
+  ws.onclose = () => { settled = true; clearTimeout(giveUpTimer); stopHeartbeat(); if (sessionActive) scheduleReconnect(); else resetUI(); };
   ws.onerror = () => { /* onclose が続けて呼ばれるのでそちらで処理 */ };
 }
 
-// 電波が切れた時：少し待って自動で繋ぎ直す（会話中のみ）
+// 電波が切れた時 / 接続に失敗した時：短い間隔で自動的に繋ぎ直す（会話中のみ）
 function scheduleReconnect() {
   if (!sessionActive || reconnectTimer) return;
   orb.classList.remove('live');
-  setStatus('接続が切れました。再接続中… 📶');
-  const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 8000);
+  setStatus('接続中… 📶（サーバが起きるまで少しお待ちください）');
+  const delay = Math.min(500 * Math.pow(1.6, reconnectAttempts), 5000);
   reconnectAttempts++;
   reconnectTimer = setTimeout(() => { reconnectTimer = null; if (sessionActive) connect(true); }, delay);
 }
