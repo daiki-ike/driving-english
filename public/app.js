@@ -117,6 +117,8 @@ async function start() {
   reconnectAttempts = 0;
   logEl.innerHTML = '';
   sessionActive = true;
+  sessionId = Date.now(); // この会話の保存先を新規作成
+  sessionRows = [];
 
   outCtx = new AudioContext({ sampleRate: 24000 });
   await outCtx.resume();
@@ -322,20 +324,20 @@ function stopPlayback() {
   if (outCtx) playHead = outCtx.currentTime;
 }
 
-// ───────── 5分タイマー → 自動ラップアップ ─────────
+// ───────── 10分タイマー → 自動ラップアップ ─────────
 function startTimer() {
   timerId = setInterval(() => {
     seconds++;
     const m = String(Math.floor(seconds / 60)).padStart(2, '0');
     const s = String(seconds % 60).padStart(2, '0');
     timerEl.textContent = `${m}:${s}`;
-    if (seconds >= 300 && !wrappedUp) wrapUp();
+    if (seconds >= 600 && !wrappedUp) wrapUp();
   }, 1000);
 }
 
 function wrapUp() {
   wrappedUp = true;
-  setStatus('5分たちました。まとめます…');
+  setStatus('10分たちました。まとめます…');
   ws?.send(JSON.stringify({
     clientContent: {
       turns: [{ role: 'user', parts: [{ text: "Okay, let's wrap up now. Please give me my recap." }] }],
@@ -357,8 +359,9 @@ function stop() {
   try { inCtx?.close(); } catch {}
   try { outCtx?.close(); } catch {}
   if (ws) { try { if (ws.readyState === WebSocket.OPEN) ws.close(); } catch {} ws = null; }
+  saveSession(); // 会話ログを確実に保存してから終了
   resetUI();
-  setStatus('終了しました。おつかれさまでした');
+  setStatus('終了しました。おつかれさまでした（ログは「過去の会話」に残っています）');
 }
 
 function resetUI() {
@@ -370,13 +373,96 @@ function resetUI() {
 // ───────── ログ（運転後の振り返り用）─────────
 function appendLog(who, text) {
   const last = logEl.lastElementChild;
-  if (last && last.dataset.who === who) { last.querySelector('.t').textContent += text; return; }
-  const row = document.createElement('div');
-  row.className = 'row ' + who;
-  row.dataset.who = who;
-  row.innerHTML = `<span class="who">${who === 'you' ? 'あなた' : 'AI'}</span><span class="t">${text}</span>`;
-  logEl.appendChild(row);
-  logEl.scrollTop = logEl.scrollHeight;
+  if (last && last.dataset.who === who) {
+    last.querySelector('.t').textContent += text;
+  } else {
+    const row = document.createElement('div');
+    row.className = 'row ' + who;
+    row.dataset.who = who;
+    row.innerHTML = `<span class="who">${who === 'you' ? 'あなた' : 'AI'}</span><span class="t">${text}</span>`;
+    logEl.appendChild(row);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  recordRow(who, text); // 端末にも保存（ブラウザを閉じても消えない）
+}
+
+// ───────── 会話履歴の永続保存（localStorage）─────────
+const HISTORY_KEY = 'de_history';
+const HISTORY_MAX = 50; // 直近50回ぶん保持
+let sessionId = null;
+let sessionRows = [];
+let saveQueued = false;
+
+function recordRow(who, text) {
+  if (!sessionId) return;
+  const last = sessionRows[sessionRows.length - 1];
+  if (last && last.who === who) last.text += text;
+  else sessionRows.push({ who, text });
+  if (!saveQueued) { // 書き込みは1秒に1回にまとめる
+    saveQueued = true;
+    setTimeout(() => { saveQueued = false; saveSession(); }, 1000);
+  }
+}
+
+function loadHistory() {
+  try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; } catch { return []; }
+}
+
+function saveSession() {
+  if (!sessionId || sessionRows.length === 0) return;
+  try {
+    const hist = loadHistory().filter((s) => s.id !== sessionId);
+    hist.push({ id: sessionId, rows: sessionRows });
+    while (hist.length > HISTORY_MAX) hist.shift();
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(hist));
+  } catch (e) { console.warn('履歴の保存に失敗', e); }
+}
+
+function fmtDate(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// 履歴画面の描画（開いたときに毎回最新化）
+const historyWrap = document.getElementById('historyWrap');
+const historyEl = document.getElementById('history');
+historyWrap?.addEventListener('toggle', () => { if (historyWrap.open) renderHistory(); });
+
+function renderHistory() {
+  const hist = loadHistory().slice().reverse(); // 新しい順
+  historyEl.innerHTML = '';
+  if (hist.length === 0) {
+    historyEl.innerHTML = '<div class="row">まだ履歴がありません。会話すると自動で残ります。</div>';
+    return;
+  }
+  for (const s of hist) {
+    const det = document.createElement('details');
+    det.className = 'hist-session';
+    const rowsHtml = s.rows.map((r) =>
+      `<div class="row ${r.who}"><span class="who">${r.who === 'you' ? 'あなた' : 'AI'}</span><span class="t">${escapeHtml(r.text)}</span></div>`
+    ).join('');
+    det.innerHTML = `<summary>${fmtDate(s.id)} の会話</summary>
+      <button class="copy-btn" data-id="${s.id}">📋 この回をコピー</button>
+      <div class="hist-rows">${rowsHtml}</div>`;
+    historyEl.appendChild(det);
+  }
+  historyEl.querySelectorAll('.copy-btn').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const s = loadHistory().find((x) => String(x.id) === btn.dataset.id);
+      if (!s) return;
+      const text = `【運転英会話 ${fmtDate(s.id)}】\n` +
+        s.rows.map((r) => `${r.who === 'you' ? 'あなた' : 'AI'}: ${r.text}`).join('\n');
+      try { await navigator.clipboard.writeText(text); btn.textContent = '✅ コピーしました'; }
+      catch { btn.textContent = '❌ コピー失敗'; }
+      setTimeout(() => { btn.textContent = '📋 この回をコピー'; }, 2000);
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // ───────── base64 ヘルパー ─────────

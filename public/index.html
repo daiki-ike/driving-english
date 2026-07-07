@@ -42,9 +42,18 @@
     #startBtn { background: #2f7d4f; }
     #stopBtn { background: #8e3b3b; }
     button:disabled { opacity: 0.4; }
-    #logWrap { margin-top: 40px; text-align: left; color: #9aa6c8; font-size: 14px; }
-    #logWrap summary { cursor: pointer; padding: 8px 0; }
+    #logWrap, #historyWrap { margin-top: 24px; text-align: left; color: #9aa6c8; font-size: 14px; }
+    #logWrap summary, #historyWrap summary { cursor: pointer; padding: 8px 0; }
     #log { max-height: 40vh; overflow-y: auto; margin-top: 8px; }
+    #history { margin-top: 8px; }
+    .hist-session { margin: 6px 0; border: 1px solid #2b3a66; border-radius: 10px; padding: 8px 12px; background: #111a35; }
+    .hist-session summary { color: #cdd6f4; }
+    .hist-rows { max-height: 40vh; overflow-y: auto; margin-top: 6px; }
+    .copy-btn {
+      display: inline-block; margin: 6px 0; padding: 8px 14px; font-size: 13px; font-weight: 700;
+      border: 1px solid #3a4a7a; border-radius: 8px; background: #1c2747; color: #cdd6f4; cursor: pointer;
+      flex: none; max-width: none;
+    }
     .row { padding: 6px 0; line-height: 1.6; }
     .row .who { display: inline-block; min-width: 56px; font-weight: 700; font-size: 12px; }
     .row.you .who { color: #7fd1a0; }
@@ -68,8 +77,13 @@
     </div>
 
     <details id="logWrap">
-      <summary>会話ログ（運転後の振り返り用）</summary>
+      <summary>会話ログ（今回の会話）</summary>
       <div id="log"></div>
+    </details>
+
+    <details id="historyWrap">
+      <summary>過去の会話（訂正・フレーズの振り返り）</summary>
+      <div id="history"></div>
     </details>
   </main>
   <script src="app.js"></script>
