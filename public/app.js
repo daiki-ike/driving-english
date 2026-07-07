@@ -465,6 +465,37 @@ function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ───────── フレーズ帳用の書き出し（全履歴をmarkdownで共有/コピー）─────────
+const exportBtn = document.getElementById('exportBtn');
+exportBtn?.addEventListener('click', exportHistory);
+
+function historyToMarkdown() {
+  const hist = loadHistory();
+  if (hist.length === 0) return null;
+  const lines = ['# 運転英会話ログ（フレーズ帳取り込み用）', `書き出し日: ${fmtDate(Date.now())}`, ''];
+  for (const s of hist) {
+    lines.push(`## セッション ${fmtDate(s.id)}`);
+    for (const r of s.rows) lines.push(`${r.who === 'you' ? 'あなた' : 'AI'}: ${r.text}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+async function exportHistory(e) {
+  e.preventDefault();
+  const md = historyToMarkdown();
+  if (!md) { exportBtn.textContent = '履歴がまだありません'; setTimeout(resetExportBtn, 2000); return; }
+  // スマホなら共有シート（メモ/LINE等に送れる）、ダメならコピー
+  if (navigator.share) {
+    try { await navigator.share({ text: md }); resetExportBtn(); return; }
+    catch (err) { if (err.name === 'AbortError') return; /* キャンセルは無視 */ }
+  }
+  try { await navigator.clipboard.writeText(md); exportBtn.textContent = '✅ コピーしました（Claudeに貼り付けて「フレーズ帳に追加」）'; }
+  catch { exportBtn.textContent = '❌ 書き出しに失敗しました'; }
+  setTimeout(resetExportBtn, 3500);
+}
+function resetExportBtn() { exportBtn.textContent = '📤 フレーズ帳用に書き出し（共有/コピー）'; }
+
 // ───────── base64 ヘルパー ─────────
 function bufToB64(arrbuf) {
   const bytes = new Uint8Array(arrbuf);
