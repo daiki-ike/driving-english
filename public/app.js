@@ -324,20 +324,20 @@ function stopPlayback() {
   if (outCtx) playHead = outCtx.currentTime;
 }
 
-// ───────── 10分タイマー → 自動ラップアップ ─────────
+// ───────── 7分タイマー → 自動ラップアップ ─────────
 function startTimer() {
   timerId = setInterval(() => {
     seconds++;
     const m = String(Math.floor(seconds / 60)).padStart(2, '0');
     const s = String(seconds % 60).padStart(2, '0');
     timerEl.textContent = `${m}:${s}`;
-    if (seconds >= 600 && !wrappedUp) wrapUp();
+    if (seconds >= 420 && !wrappedUp) wrapUp();
   }, 1000);
 }
 
 function wrapUp() {
   wrappedUp = true;
-  setStatus('10分たちました。まとめます…');
+  setStatus('7分たちました。まとめます…');
   ws?.send(JSON.stringify({
     clientContent: {
       turns: [{ role: 'user', parts: [{ text: "Okay, let's wrap up now. Please give me my recap." }] }],
